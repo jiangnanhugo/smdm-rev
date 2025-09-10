@@ -33,7 +33,7 @@ from safetensors.torch import load_file
 def parse_args():
     parse = argparse.ArgumentParser()
     parse.add_argument('--model', type=int, help='model parameters')
-    parse.add_argument('--bs', type=int, default=256, help='batch size')
+    parse.add_argument('--bs', type=int, default=2, help='batch size')
     parse.add_argument('--epoch', type=int, default=40, help='training epoch')
     parse.add_argument('--pretrain_path', type=str, help='pretrain ckpt path')
     parse.add_argument('--nodes_num', type=int, default=1, help='number of devices')
@@ -47,10 +47,10 @@ model_name = f'Diff_LLaMA_{args.model}M'  # config
 out_dir = Path('workdir')
 
 # Hyperparameters
-num_of_devices = 8
+num_of_devices = 2
 global_batch_size = int(args.bs / args.nodes_num)
 learning_rate = 2e-4
-micro_batch_size = 16
+micro_batch_size = 1
 max_step = int(769240 * args.epoch / args.bs)
 warmup_steps = int(max_step * 0.01)
 log_step_interval = 10
@@ -65,6 +65,7 @@ min_lr = learning_rate / 10
 
 batch_size = global_batch_size // num_of_devices
 gradient_accumulation_steps = batch_size // micro_batch_size
+print(f'gradient_accumulation_steps: {gradient_accumulation_steps}')
 assert gradient_accumulation_steps > 0
 warmup_iters = warmup_steps * gradient_accumulation_steps
 
@@ -168,7 +169,7 @@ def extract_number(filename):
 
 
 def setup(
-        devices: int = 8,
+        devices: int = 2,
         precision: Optional[str] = None,
         tpu: bool = False,
         resume: Union[bool, Path] = True,
@@ -218,7 +219,7 @@ def main(fabric, pretrain_path, resume):
 
     fabric.seed_everything(3407)  # same seed for every process to init model (FSDP)
     train_dataloader = DataLoader(train_set, batch_size=micro_batch_size, shuffle=True, drop_last=True,
-                                  num_workers=8, pin_memory=True, persistent_workers=True)
+                                  num_workers=1, pin_memory=True, persistent_workers=True)
     train_dataloader = fabric.setup_dataloaders(train_dataloader)
 
     fabric.print(f"Loading model with {config.__dict__}")
@@ -235,38 +236,24 @@ def main(fabric, pretrain_path, resume):
     fabric.print(f"Total parameters {num_parameters(model):,}")
 
     model = fabric.setup(model)
-    # Teacher initialization: load from HF or local safetensors if provided, otherwise clone student
-    teacher = TransEncoder(config)
-    teacher_loaded = False
-    if args.teacher_path:
-        teacher_ckpt_path = args.teacher_path
-        # If not a local file, try Hugging Face download
-        if not os.path.isfile(teacher_ckpt_path):
-            try:
-                from huggingface_hub import hf_hub_download
-                # default to nieshen/SMDM gsm8k file if a URL or repo hint is passed
-                repo_id = 'nieshen/SMDM'
-                # default filename from known artifact
-                filename = 'gsm8k_safetensors/mdm-1028M-3300e18-rsl-gsm8k.safetensors'
-                teacher_ckpt_path = hf_hub_download(repo_id=repo_id, filename=filename)
-                fabric.print(f"Downloaded teacher checkpoint from HF: {repo_id}/{filename}")
-            except Exception as e:
-                fabric.print(f"Falling back to EMA teacher; could not resolve HF teacher checkpoint: {e}")
-                teacher_ckpt_path = ''
-        if teacher_ckpt_path and os.path.isfile(teacher_ckpt_path):
-            try:
-                t_ckpt = load_file(teacher_ckpt_path)
-                missing, unexpected = teacher.load_state_dict(t_ckpt, strict=False)
-                fabric.print(f"Loaded teacher from {teacher_ckpt_path}. Missing: {len(missing)}, Unexpected: {len(unexpected)}")
-                teacher_loaded = True
-                distill_cfg["freeze_teacher"] = True
-            except Exception as e:
-                fabric.print(f"Failed to load provided teacher checkpoint, fallback to EMA teacher: {e}")
-    if not teacher_loaded:
-        teacher.load_state_dict(model.state_dict(), strict=True)
+
+
+    # # Teacher initialization: load from HF or local safetensors if provided, otherwise clone student
+    
+    with fabric.init_module(empty_init=False):
+        teacher = TransEncoder(config)
+        model.apply(partial(model._init_weights, n_layer=config.n_layer))
+
+        ckpt_dic = load_file(args.teacher_path)
+        teacher.load_state_dict(ckpt_dic)
+        fabric.print(f"Loading teacher model from {args.teacher_path}")
         distill_cfg["freeze_teacher"] = False
     for p in teacher.parameters():
         p.requires_grad_(False)
+
+    fabric.print(f"Time to instantiate TEACHER: {time.perf_counter() - t0:.02f} seconds.")
+    fabric.print(f"Total parameters {num_parameters(teacher):,}")
+    
     teacher = fabric.setup(teacher)
     optimizer = torch.optim.AdamW(
         model.parameters(), lr=learning_rate, weight_decay=weight_decay, betas=(beta1, beta2), foreach=False
@@ -447,5 +434,5 @@ def get_lr(it):
 if __name__ == "__main__":
     # Uncomment this line if you see an error: "Expected is_sm80 to be true, but got false"
     # torch.backends.cuda.enable_flash_sdp(False)
-    torch.set_float32_matmul_precision("high")
+    # torch.set_float32_matmul_precision("high")
     setup()

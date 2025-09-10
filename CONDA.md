@@ -10,6 +10,7 @@ pip uninstall ninja -y && pip install ninja -U
 
 git clone https://github.com/Dao-AILab/flash-attention
 cd flash-attention
+git checkout v2.6.3 ### added by Nan
 pip install packaging
 python setup.py install
 

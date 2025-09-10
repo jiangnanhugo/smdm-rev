@@ -10,5 +10,7 @@
 export XFORMERS_IGNORE_FLASH_VERSION_CHECK=1
 
 
-python sft/distillation_finetune_mdm_gsm8k.py --model 1028 \
-    --pretrain_path models/mdm-1028M-3300e18-rsl-0.01-bs-1024.safetensors
+
+lightning run model sft/distillation_finetune_mdm_gsm8k.py --devices=2 --model 170 \
+    --pretrain_path models/mdm-170M-100e18.safetensors \
+    --teacher_path models/mdm-170M-100e18.safetensors
