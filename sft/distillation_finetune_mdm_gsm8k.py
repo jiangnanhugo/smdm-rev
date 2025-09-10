@@ -323,7 +323,7 @@ def train(fabric, state, train_dataloader, monitor, resume):
 
     train_dataloader_ = get_train_dataloader(train_dataloader)
 
-    loss_func = CrossEntropyLoss(reduction='none')
+    # loss_func = CrossEntropyLoss(reduction='none')
     for train_data in train_dataloader_:
         # resume loader state. This is not elegant but it works. Should rewrite it in the future.
         if resume:
@@ -375,6 +375,7 @@ def train(fabric, state, train_dataloader, monitor, resume):
             temp_tensor = torch.arange(input_ids.size(1), device=input_ids.device).expand(input_ids.size(0),
                                                                                           input_ids.size(1))
             answer_mask = (temp_tensor >= prompt_length.unsqueeze(1)).to(student_logits.dtype)
+            # DISTILLATION LOSS
             loss = _kl_forward_with_mask(student_logits, teacher_logits, answer_mask)
 
             fabric.backward(loss / gradient_accumulation_steps)
